@@ -2,22 +2,22 @@
 
 # Offlineimap IMAP to Mbox Backup Script (Self-Contained)
 # All configuration and backups stored in script directory
-# Works from anywhere, stores everything locally
 
 set -e
 
-# Get script directory (where this script is located)
+# Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Configuration Paths (all relative to script directory)
+# Configuration Paths
 CONFIG_DIR="${SCRIPT_DIR}/accounts"
 BACKUP_DIR="${SCRIPT_DIR}/data"
 LOG_DIR="${SCRIPT_DIR}/logs"
 ACCOUNTS_CONFIG="${CONFIG_DIR}/accounts.conf"
+OFFLINEIMAP_CONFIG="${CONFIG_DIR}/offlineimaprc"
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 LOG_FILE="${LOG_DIR}/backup_${TIMESTAMP}.log"
 
-# Color output (disabled if not a TTY, useful for cron)
+# Color output
 if [ -t 1 ]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
@@ -32,16 +32,18 @@ else
     NC=''
 fi
 
-# Logging Functions
+# Logging
 log() {
     local msg="[$(date +'%Y-%m-%d %H:%M:%S')] $1"
+    mkdir -p "${LOG_DIR}"
     echo -e "${msg}" >> "${LOG_FILE}"
     [ -t 1 ] && echo -e "${msg}"
 }
 
 error() {
     local msg="${RED}[ERROR]${NC} $1"
-    echo -e "${msg}" >> "${LOG_FILE}"
+    mkdir -p "${LOG_DIR}"
+    echo -e "${msg}" >> "${LOG_FILE}" 2>&1
     echo -e "${msg}" >&2
     exit 1
 }
@@ -64,137 +66,127 @@ info() {
     [ -t 1 ] && echo -e "${msg}"
 }
 
-# Check if offlineimap is installed
-check_offlineimap() {
-    if ! command -v offlineimap &> /dev/null; then
-        error "offlineimap is not installed. Install it with: pip install offlineimap3"
-    fi
-    log "offlineimap found: $(offlineimap --version 2>&1 | head -n1)"
-}
-
-# Create necessary directories
-setup_directories() {
+# Setup
+setup() {
     mkdir -p "${CONFIG_DIR}"
     mkdir -p "${BACKUP_DIR}"
     mkdir -p "${LOG_DIR}"
     mkdir -p "${CONFIG_DIR}/passwords"
-    log "Script directory: ${SCRIPT_DIR}"
-    log "Config directory: ${CONFIG_DIR}"
-    log "Backup directory: ${BACKUP_DIR}"
-    log "Log directory: ${LOG_DIR}"
+    log "Directories initialized"
 }
 
-# Check if accounts config exists
-check_accounts_config() {
-    if [ ! -f "${ACCOUNTS_CONFIG}" ]; then
-        return 1
+# Check offlineimap
+check_offlineimap() {
+    if ! command -v offlineimap &> /dev/null; then
+        error "offlineimap not installed. Run: pip install offlineimap3"
     fi
-    return 0
 }
 
-# Create template accounts config
-create_accounts_template() {
+# Create template
+create_template() {
+    if [ -f "${ACCOUNTS_CONFIG}" ]; then
+        return
+    fi
+    
     cat > "${ACCOUNTS_CONFIG}" << 'EOF'
 # Offlineimap Accounts Configuration
 # Format: account_name|imap_server|email|password_file|local_folder
-# Lines starting with # are comments
-# Do not commit password files to version control!
 
-# Example for Gmail:
-# gmail|imap.gmail.com|your-email@gmail.com|passwords/gmail.pass|gmail
-
-# Example for Outlook:
-# outlook|outlook.office365.com|your-email@outlook.com|passwords/outlook.pass|outlook
-
-# Example for Exchange:
-# exchange|exchange2019.livemail.co.uk|user@example.com|passwords/exchange.pass|exchange
+# Examples:
+# myaccount|imap.gmail.com|user@gmail.com|passwords/myaccount.pass|myaccount
+# work|mail.company.com|user@company.com|passwords/work.pass|work
 EOF
-    log "Template accounts config created at ${ACCOUNTS_CONFIG}"
+    log "Created template: ${ACCOUNTS_CONFIG}"
 }
 
-# Interactive account setup
-setup_new_account() {
-    info "=== Setting up new email account ==="
+# Setup new account
+setup_account() {
+    log "Setting up new account..."
     
-    read -p "Account name (e.g., sophiegerrard, gmail, work): " account_name
-    [ -z "${account_name}" ] && error "Account name cannot be empty"
+    read -p "Account name: " account_name
+    [ -z "${account_name}" ] && error "Account name required"
     
-    # Check if account already exists
-    if grep -q "^${account_name}|" "${ACCOUNTS_CONFIG}" 2>/dev/null; then
-        warning "Account '${account_name}' already exists. Updating it..."
-        # Remove existing account
-        sed -i.bak "/^${account_name}|/d" "${ACCOUNTS_CONFIG}"
-    fi
-    
-    read -p "IMAP server (e.g., imap.gmail.com, exchange2019.livemail.co.uk): " imap_server
-    [ -z "${imap_server}" ] && error "IMAP server cannot be empty"
+    read -p "IMAP server: " imap_server
+    [ -z "${imap_server}" ] && error "IMAP server required"
     
     read -p "Email address: " email
-    [ -z "${email}" ] && error "Email address cannot be empty"
+    [ -z "${email}" ] && error "Email required"
     
-    read -sp "IMAP password: " password
+    read -sp "Password: " password
     echo
-    read -sp "Confirm password: " password_confirm
+    read -sp "Confirm: " password_confirm
     echo
     
-    if [ "${password}" != "${password_confirm}" ]; then
-        error "Passwords do not match"
+    [ "${password}" != "${password_confirm}" ] && error "Passwords don't match"
+    
+    # Save password
+    local pass_file="${CONFIG_DIR}/passwords/${account_name}.pass"
+    echo "${password}" > "${pass_file}"
+    chmod 600 "${pass_file}"
+    log "Password saved: ${pass_file}"
+    
+    # Add to config
+    echo "${account_name}|${imap_server}|${email}|passwords/${account_name}.pass|${account_name}" >> "${ACCOUNTS_CONFIG}"
+    success "Account '${account_name}' added"
+    
+    # Ask if they want to do a one-time backup now
+    read -p "Run one-time backup now? (y/n): " run_backup
+    if [[ $run_backup =~ ^[Yy]$ ]]; then
+        generate_config
+        run_onetime_backup "${account_name}"
     fi
-    
-    # Create password file
-    local password_file="passwords/${account_name}.pass"
-    echo "${password}" > "${CONFIG_DIR}/${password_file}"
-    chmod 600 "${CONFIG_DIR}/${password_file}"
-    log "Password file created: ${CONFIG_DIR}/${password_file}"
-    
-    # Add to accounts config
-    echo "${account_name}|${imap_server}|${email}|${password_file}|${account_name}" >> "${ACCOUNTS_CONFIG}"
-    success "Account '${account_name}' added to configuration"
-    
-    return 0
 }
 
-# Generate offlineimap config from accounts file
-generate_offlineimap_config() {
-    local accounts_list=()
-    local account_count=0
+# Generate offlineimap config
+generate_config() {
+    log "Generating offlineimap config..."
     
-    # Read accounts file and build list
-    while IFS='|' read -r account imap_server email password_file local_folder; do
-        [[ "${account}" =~ ^#.*$ || -z "${account}" ]] && continue
+    if [ ! -f "${ACCOUNTS_CONFIG}" ]; then
+        error "No accounts configured"
+    fi
+    
+    # Build account list
+    local accounts=""
+    local first=1
+    while IFS='|' read -r account imap_server email pass_file folder; do
+        # Skip comments and empty lines
+        [[ "$account" =~ ^#.*$ ]] && continue
+        [ -z "$account" ] && continue
         
-        accounts_list+=("${account}")
-        ((account_count++))
+        if [ $first -eq 1 ]; then
+            accounts="$account"
+            first=0
+        else
+            accounts="$accounts,$account"
+        fi
     done < "${ACCOUNTS_CONFIG}"
     
-    if [ ${account_count} -eq 0 ]; then
+    if [ -z "$accounts" ]; then
         error "No valid accounts found in ${ACCOUNTS_CONFIG}"
     fi
     
-    local accounts_string=$(IFS=,; echo "${accounts_list[*]}")
-    local offlineimap_config="${CONFIG_DIR}/offlineimaprc"
+    log "Found accounts: $accounts"
     
-    # Create main offlineimap config
-    cat > "${offlineimap_config}" << EOF
-# Auto-generated Offlineimap Configuration
-# Generated: $(date)
-# Do not edit manually. Update accounts.conf instead.
-
+    # Generate config
+    cat > "${OFFLINEIMAP_CONFIG}" << EOF
 [general]
-accounts = ${accounts_string}
+accounts = ${accounts}
 maxsyncaccounts = 1
 metadata = ${CONFIG_DIR}/.metadata
 ui = Noninteractive.Basic
 
 EOF
 
-    # Add account and repository sections
-    while IFS='|' read -r account imap_server email password_file local_folder; do
-        [[ "${account}" =~ ^#.*$ || -z "${account}" ]] && continue
+    # Add each account
+    while IFS='|' read -r account imap_server email pass_file folder; do
+        # Skip comments and empty lines
+        [[ "$account" =~ ^#.*$ ]] && continue
+        [ -z "$account" ] && continue
         
-        local local_path="${BACKUP_DIR}/${local_folder}"
+        local local_path="${BACKUP_DIR}/${folder}"
+        local full_pass_file="${CONFIG_DIR}/${pass_file}"
         
-        cat >> "${offlineimap_config}" << EOF
+        cat >> "${OFFLINEIMAP_CONFIG}" << EOF
 [Account ${account}]
 localrepository = ${account}_local
 remoterepository = ${account}_remote
@@ -202,7 +194,7 @@ autorefresh = 0
 quick = 10
 
 [Repository ${account}_local]
-type = Mbox
+type = Maildir
 localfolders = ${local_path}
 createmissingfolders = yes
 
@@ -210,254 +202,256 @@ createmissingfolders = yes
 type = IMAP
 remotehost = ${imap_server}
 remoteuser = ${email}
-remotepassfile = ${CONFIG_DIR}/${password_file}
+remotepassfile = ${full_pass_file}
 ssl = yes
 sslcacertfile = /etc/ssl/certs/ca-certificates.crt
 
 EOF
     done < "${ACCOUNTS_CONFIG}"
     
-    log "Generated offlineimap config: ${offlineimap_config}"
+    success "Config generated: ${OFFLINEIMAP_CONFIG}"
 }
 
-# Run backup for all accounts
+# Run backup (all accounts)
 run_backup_all() {
-    local offlineimap_config="${CONFIG_DIR}/offlineimaprc"
+    log "Starting backup (all accounts)..."
     
-    if [ ! -f "${offlineimap_config}" ]; then
-        error "Offlineimap config not found. Run setup first."
+    if [ ! -f "${OFFLINEIMAP_CONFIG}" ]; then
+        error "Config file missing"
     fi
     
-    log "Starting backup for all accounts..."
-    log "Config: ${offlineimap_config}"
-    
-    if offlineimap -c "${offlineimap_config}" -u Noninteractive.Basic >> "${LOG_FILE}" 2>&1; then
-        success "Backup completed successfully"
-        return 0
+    if offlineimap -c "${OFFLINEIMAP_CONFIG}" -u Noninteractive.Basic >> "${LOG_FILE}" 2>&1; then
+        success "Backup complete"
     else
-        error "Backup failed. Check ${LOG_FILE} for details"
-        return 1
+        error "Backup failed - check log: ${LOG_FILE}"
     fi
 }
 
-# Run backup for a single account
-run_backup_account() {
-    local account_name="$1"
+# Run backup (single account)
+run_backup_single() {
+    local account="$1"
+    log "Starting backup for account: ${account}"
     
-    if [ -z "${account_name}" ]; then
-        error "Account name required"
+    if [ ! -f "${OFFLINEIMAP_CONFIG}" ]; then
+        error "Config file missing"
     fi
     
-    # Check if account exists
-    if ! grep -q "^${account_name}|" "${ACCOUNTS_CONFIG}" 2>/dev/null; then
-        error "Account '${account_name}' not found in configuration"
+    # Verify account exists
+    if ! grep -q "^${account}|" "${ACCOUNTS_CONFIG}"; then
+        error "Account '${account}' not found"
     fi
     
-    local offlineimap_config="${CONFIG_DIR}/offlineimaprc"
-    
-    if [ ! -f "${offlineimap_config}" ]; then
-        error "Offlineimap config not found. Run setup first."
-    fi
-    
-    log "Starting backup for account: ${account_name}"
-    log "Config: ${offlineimap_config}"
-    
-    if offlineimap -c "${offlineimap_config}" -a "${account_name}" -u Noninteractive.Basic >> "${LOG_FILE}" 2>&1; then
-        success "Backup completed successfully for ${account_name}"
-        return 0
+    if offlineimap -c "${OFFLINEIMAP_CONFIG}" -a "${account}" -u Noninteractive.Basic >> "${LOG_FILE}" 2>&1; then
+        success "Backup complete for ${account}"
     else
-        error "Backup failed for ${account_name}. Check ${LOG_FILE} for details"
-        return 1
+        error "Backup failed for ${account} - check log: ${LOG_FILE}"
     fi
 }
 
-# Create archive of backup
-create_archive() {
-    local archive_name="mail_backup_${TIMESTAMP}.tar.gz"
-    log "Creating archive: ${archive_name}"
+# Run one-time backup (no persistent storage, just tar)
+run_onetime_backup() {
+    local account="$1"
+    log "Starting one-time backup for account: ${account}"
     
-    if [ ! -d "${BACKUP_DIR}" ] || [ -z "$(ls -A "${BACKUP_DIR}")" ]; then
-        warning "No data to archive"
-        return 1
-    fi
-    
-    if tar -czf "${SCRIPT_DIR}/${archive_name}" -C "${BACKUP_DIR}" . 2>> "${LOG_FILE}"; then
-        success "Archive created: ${SCRIPT_DIR}/${archive_name}"
-        local size=$(du -h "${SCRIPT_DIR}/${archive_name}" | cut -f1)
-        log "Archive size: ${size}"
-        return 0
-    else
-        warning "Failed to create archive"
-        return 1
-    fi
-}
-
-# List configured accounts
-list_accounts() {
     if [ ! -f "${ACCOUNTS_CONFIG}" ]; then
-        warning "No accounts configured yet"
-        return 1
+        error "No accounts configured"
+    fi
+    
+    # Verify account exists
+    if ! grep -q "^${account}|" "${ACCOUNTS_CONFIG}"; then
+        error "Account '${account}' not found"
+    fi
+    
+    # Create temporary directory for this backup
+    local temp_backup_dir="${BACKUP_DIR}/.temp_${account}_${TIMESTAMP}"
+    local temp_config="${SCRIPT_DIR}/.temp_offlineimaprc_${TIMESTAMP}"
+    
+    mkdir -p "${temp_backup_dir}"
+    
+    log "Using temporary directory: ${temp_backup_dir}"
+    
+    # Get account details
+    while IFS='|' read -r acc imap_server email pass_file folder; do
+        [[ "$acc" =~ ^#.*$ ]] && continue
+        [ -z "$acc" ] && continue
+        [ "$acc" != "$account" ] && continue
+        
+        local full_pass_file="${CONFIG_DIR}/${pass_file}"
+        
+        # Generate temporary config
+        cat > "${temp_config}" << EOF
+[general]
+accounts = ${account}
+maxsyncaccounts = 1
+metadata = ${BACKUP_DIR}/.metadata_temp_${TIMESTAMP}
+ui = Noninteractive.Basic
+
+[Account ${account}]
+localrepository = ${account}_local
+remoterepository = ${account}_remote
+autorefresh = 0
+quick = 10
+
+[Repository ${account}_local]
+type = Maildir
+localfolders = ${temp_backup_dir}
+createmissingfolders = yes
+
+[Repository ${account}_remote]
+type = IMAP
+remotehost = ${imap_server}
+remoteuser = ${email}
+remotepassfile = ${full_pass_file}
+ssl = yes
+sslcacertfile = /etc/ssl/certs/ca-certificates.crt
+
+EOF
+    done < "${ACCOUNTS_CONFIG}"
+    
+    # Run backup to temp location
+    if offlineimap -c "${temp_config}" -a "${account}" -u Noninteractive.Basic >> "${LOG_FILE}" 2>&1; then
+        # Create tar file
+        local tar_file="${SCRIPT_DIR}/${account}_backup_${TIMESTAMP}.tar.gz"
+        log "Creating archive: ${tar_file}"
+        
+        if tar -czf "${tar_file}" -C "${temp_backup_dir}" . 2>> "${LOG_FILE}"; then
+            local size=$(du -h "${tar_file}" | cut -f1)
+            success "One-time backup complete: ${tar_file} (${size})"
+            log "Archive location: ${tar_file}"
+            
+            # Cleanup temp files
+            rm -rf "${temp_backup_dir}"
+            rm -f "${temp_config}"
+            rm -rf "${BACKUP_DIR}/.metadata_temp_${TIMESTAMP}"
+            
+            return 0
+        else
+            error "Failed to create archive"
+        fi
+    else
+        error "Backup failed for ${account} - check log: ${LOG_FILE}"
+    fi
+    
+    # Cleanup on failure
+    rm -rf "${temp_backup_dir}"
+    rm -f "${temp_config}"
+    rm -rf "${BACKUP_DIR}/.metadata_temp_${TIMESTAMP}"
+}
+
+# List accounts
+list() {
+    if [ ! -f "${ACCOUNTS_CONFIG}" ]; then
+        warning "No accounts configured"
+        return
     fi
     
     info "Configured accounts:"
     echo
-    local count=0
-    while IFS='|' read -r account imap_server email password_file local_folder; do
-        [[ "${account}" =~ ^#.*$ || -z "${account}" ]] && continue
-        ((count++))
-        local backup_path="${BACKUP_DIR}/${local_folder}"
-        local size="(no data)"
-        if [ -d "${backup_path}" ]; then
-            size=$(du -sh "${backup_path}" 2>/dev/null | cut -f1)
-        fi
-        echo "  ${count}. ${account} (${email} @ ${imap_server}) - ${size}"
+    local n=0
+    while IFS='|' read -r account imap_server email pass_file folder; do
+        [[ "$account" =~ ^#.*$ ]] && continue
+        [ -z "$account" ] && continue
+        ((n++))
+        
+        local data_path="${BACKUP_DIR}/${folder}"
+        local size="(empty)"
+        [ -d "$data_path" ] && size=$(du -sh "$data_path" 2>/dev/null | cut -f1)
+        
+        echo "  $n. $account ($email @ $imap_server) - $size"
     done < "${ACCOUNTS_CONFIG}"
-    
-    if [ ${count} -eq 0 ]; then
-        warning "No accounts configured"
-        return 1
-    fi
-    echo
-    return 0
-}
-
-# Show disk usage
-show_usage() {
-    info "Disk usage:"
-    echo
-    if [ -d "${BACKUP_DIR}" ] && [ -n "$(ls -A "${BACKUP_DIR}")" ]; then
-        du -sh "${BACKUP_DIR}"/*
-    else
-        echo "  (no data)"
-    fi
     echo
 }
 
 # Show usage
-usage() {
+show_usage() {
+    if [ ! -d "${BACKUP_DIR}" ] || [ -z "$(ls -A "${BACKUP_DIR}")" ]; then
+        info "No backups yet"
+        return
+    fi
+    
+    info "Backup usage:"
+    echo
+    du -sh "${BACKUP_DIR}"/*
+    echo
+}
+
+# Help
+help() {
     cat << EOF
-${BLUE}Offlineimap IMAP to Mbox Backup Script${NC}
+${BLUE}Email Backup Script${NC}
 
-${GREEN}USAGE:${NC}
-    $0 [COMMAND] [OPTIONS]
+${GREEN}Commands:${NC}
+  init                  Initialize directories
+  setup                 Add new account (with optional one-time backup)
+  list                  List all accounts
+  sync                  Backup all accounts (persistent storage)
+  sync ACCOUNT          Backup single account (persistent storage)
+  onetime ACCOUNT       One-time backup to tar file (no persistent storage)
+  usage                 Show disk usage
+  help                  Show this help
 
-${GREEN}COMMANDS:${NC}
-    setup               Interactive setup for a new account
-    list                List all configured accounts
-    sync                Backup all configured accounts
-    sync [account]      Backup a single account (e.g., sophiegerrard)
-    archive             Create compressed tar.gz archive
-    usage               Show disk usage of backups
-    init                Initialize directory structure
+${GREEN}Examples:${NC}
+  ./offlineimap_backup.sh init
+  ./offlineimap_backup.sh setup              # Will ask for one-time backup
+  ./offlineimap_backup.sh sync               # Backup all to data/
+  ./offlineimap_backup.sh sync myaccount     # Backup one to data/
+  ./offlineimap_backup.sh onetime myaccount  # One-time backup to tar file
 
-${GREEN}EXAMPLES:${NC}
-    # First-time setup
-    $0 init
-    
-    # Add a new account
-    $0 setup
-    
-    # List accounts
-    $0 list
-    
-    # Backup all accounts
-    $0 sync
-    
-    # Backup just sophiegerrard
-    $0 sync sophiegerrard
-    
-    # Check backup sizes
-    $0 usage
-    
-    # Cron job (daily at 2 AM)
-    0 2 * * * cd /home/backupserver/backup/email && ./offlineimap_backup.sh sync
-
-${GREEN}DIRECTORY STRUCTURE:${NC}
-    ${SCRIPT_DIR}/
-    ├── offlineimap_backup.sh          (this script)
-    ├── accounts/
-    │   ├── accounts.conf              (account list)
-    │   ├── passwords/
-    │   │   ├── sophiegerrard.pass
-    │   │   └── ...
-    │   └── offlineimaprc              (auto-generated config)
-    ├── data/
-    │   ├── sophiegerrard/             (mbox data for sophiegerrard)
-    │   └── ...
-    └── logs/
-        └── backup_*.log
+${GREEN}Persistent vs One-Time:${NC}
+  - 'sync': Stores backups in data/account/ directory for incremental updates
+  - 'onetime': Creates a tar.gz file in script directory, cleans up temp files
 
 EOF
 }
 
-# Main execution
+# Main
 main() {
-    local command="${1:-sync}"
-    local account_arg="${2:-}"
+    local cmd="${1:-sync}"
+    local arg="${2:-}"
     
-    # Ensure log directory exists before any logging
-    mkdir -p "${LOG_DIR}"
+    setup
     
-    case "${command}" in
-        setup)
-            setup_directories
+    case "$cmd" in
+        init)
             check_offlineimap
-            if ! check_accounts_config; then
-                create_accounts_template
-            fi
-            setup_new_account
-            generate_offlineimap_config
+            create_template
+            success "Initialized. Run: $0 setup"
+            ;;
+        setup)
+            create_template
+            setup_account
             ;;
         list)
-            setup_directories
-            list_accounts
+            list
             ;;
         sync)
-            setup_directories
             check_offlineimap
-            if ! check_accounts_config; then
-                error "No accounts configured. Run '$0 setup' first"
-            fi
-            generate_offlineimap_config
-            log "=== Starting Backup Sync ==="
-            
-            if [ -z "${account_arg}" ]; then
-                # Backup all accounts
+            create_template
+            generate_config
+            if [ -z "$arg" ]; then
                 run_backup_all
             else
-                # Backup single account
-                run_backup_account "${account_arg}"
+                run_backup_single "$arg"
             fi
-            success "Backup process complete"
             ;;
-        archive)
-            setup_directories
-            log "=== Creating Archive ==="
-            create_archive
+        onetime)
+            [ -z "$arg" ] && error "Account name required: $0 onetime ACCOUNT"
+            check_offlineimap
+            create_template
+            run_onetime_backup "$arg"
             ;;
         usage)
-            setup_directories
             show_usage
             ;;
-        init)
-            setup_directories
-            check_offlineimap
-            if ! check_accounts_config; then
-                create_accounts_template
-            fi
-            success "Configuration structure initialized"
-            info "Next step: Run '$0 setup' to add your first account"
-            ;;
         help|--help|-h)
-            usage
+            help
             ;;
         *)
-            echo "Unknown command: ${command}" >&2
-            usage
+            echo "Unknown command: $cmd"
+            help
             exit 1
             ;;
     esac
 }
 
-# Run main function
 main "$@"
