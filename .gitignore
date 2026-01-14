@@ -1,0 +1,60 @@
+# Email Backup Script - Git Ignore File
+# Prevents committing sensitive data and backup files
+
+# IMPORTANT: Never commit password files or email backups to version control!
+
+# Accounts directory - SENSITIVE DATA
+accounts/
+# Or be more specific:
+# accounts/accounts.conf         # Account list with email addresses
+# accounts/passwords/            # Password files
+# accounts/*.pass                # Individual password files
+# accounts/offlineimaprc         # Auto-generated config
+# accounts/.metadata/            # Offlineimap metadata
+
+# Email backup data (can be large, should store separately)
+data/
+*.tar.gz
+*.tar.bz2
+*.zip
+
+# Logs (not needed in repo)
+logs/
+*.log
+
+# Offlineimap cache and metadata
+.offlineimap/
+.metadata/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*.swo
+
+# Linux/Vim
+*~
+.*.swp
+.*.swo
+*.mo
+
+# IDE and editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.vim/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# OS backup files
+Thumbs.db
+desktop.ini
+
+# Cron logs (optional - can be useful to keep for audit)
+# logs/cron.log
